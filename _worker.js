@@ -1,15 +1,5 @@
-// =====================================================================
-//  v1.24 - Muse VMess Panel UUID KV (karya orisinal Muse untuk Kancil)
-//  v1.24: basis v1.23; UUID VMess client sekarang bisa ditambah dari panel dan disimpan di PANEL_KV (key vmess_uuids), jadi menambah client VMess tidak perlu edit script/deploy ulang. USER_UUID tetap master; VMESS_CLIENT_UUIDS statis tetap didukung sebagai cadangan. Fitur block reload KV, UUID Master/Random, dan key panel tersimpan tetap
-//  (koneksi aktif per isolate, log aktivitas, blokir UUID/password;
-//  koneksi berjalan tidak diputus, blokir berlaku koneksi berikutnya)
-//  VMess AEAD PENUH di Cloudflare Pages/Worker: header + body terenkripsi
-//  (AES-128-GCM & ChaCha20-Poly1305), chunk framing + SHAKE-128 masking,
-//  bukan sekadar header seperti script nemu. Uji sandbox: klien VMess
-//  AEAD independen (443/80, AES/ChaCha) tembus end-to-end.
-//  Deploy: jadikan _worker.js di Pages. Atur USER_UUID master dan VMESS_CLIENT_UUIDS di bawah.
-//  Port 80 (NTLS) butuh "Always Use HTTPS" OFF di zona domain kamu.
-// =====================================================================
+// v1.25 - Muse VMess Panel Terpisah
+// Badge UI: v1.25 - Muse VMess Panel Terpisah
 import { connect } from "cloudflare:sockets";
 
 const USER_UUID = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -53,19 +43,30 @@ const PROXY_MAP = {
   "sg-ovh": "51.79.177.53:443"
 };
 
-const VERSION_LABEL = "v1.24 - Muse VMess Panel UUID KV";
-// ---------------- v1.24: PANEL PANTAU + BLOKIR UUID ----------------
+const VERSION_LABEL = "v1.25 - Muse VMess Panel Terpisah";
+// ---------------- Panel Pantau + Blokir UUID ----------------
 // Key panel: ganti nilai PANEL_KEY ini sebelum deploy kalau mau key sendiri.
 // Panel dibuka dari dashboard utama (kartu "PANEL PANTAU & BLOKIR UUID").
 // Daftar blokir awet bila ada binding KV bernama PANEL_KV; tanpa KV hanya
 // di memori (reset saat Worker restart/redeploy). Koneksi yang sedang
 // berjalan TIDAK diputus saat diblokir; UUID gagal pada koneksi berikutnya.
 const PANEL_KEY = "kancil-c66eefd1f81d5aee";
-const PANEL = { active: new Map(), recent: [], blocked: new Set(), vmessUuids: new Set() };
+const PANEL = { active: new Map(), recent: [], blocked: new Set(), vmessUuids: new Set(), clearedAt: 0 };
 let panelSeq = 0, panelKv = null, panelKvReady = false, panelBlockedLoadedAt = 0, panelVmessLoadedAt = 0;
 function panelLog(action, info) {
   PANEL.recent.unshift(Object.assign({ t: Date.now(), action: action }, info || {}));
   if (PANEL.recent.length > 60) PANEL.recent.length = 60;
+}
+function panelCleanupActive(now) {
+  now = now || Date.now();
+  for (const [sid, a] of PANEL.active) {
+    if ((PANEL.clearedAt && a.since <= PANEL.clearedAt) || now - a.since > 30 * 60 * 1000) PANEL.active.delete(sid);
+  }
+  while (PANEL.active.size > 1000) {
+    const first = PANEL.active.keys().next().value;
+    if (first === undefined) break;
+    PANEL.active.delete(first);
+  }
 }
 async function panelLoadBlocked(env, force) {
   panelKv = (env && env.PANEL_KV) ? env.PANEL_KV : panelKv;
@@ -116,8 +117,10 @@ function uuidFromBytes(b) {
   return h.slice(0, 8) + "-" + h.slice(8, 12) + "-" + h.slice(12, 16) + "-" + h.slice(16, 20) + "-" + h.slice(20);
 }
 function panelRegister(meta, proto, id, target) {
+  panelCleanupActive(Date.now());
   const sid = ++panelSeq;
   PANEL.active.set(sid, { sid: sid, proto: proto, id: id, target: target, host: meta.host || "", ip: meta.ip || "", country: meta.country || "", path: meta.path || "", since: Date.now() });
+  panelCleanupActive(Date.now());
   panelLog("konek", { proto: proto, id: id, target: target, host: meta.host || "", path: meta.path || "" });
   return sid;
 }
@@ -956,13 +959,14 @@ async function handleSession(serverWs, fallbackNode, meta) {
 
 // ---------------- UI generator ----------------
 class ConfigUI {
-  static render(domain) {
+  static render(domain, viewMode) {
     return `<!DOCTYPE html>
 <html lang="id">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Kancil VPN - Forest & Wood Theme</title>
+<title>${viewMode === "panel" ? "Panel Pantau & Blokir UUID" : "Kancil VPN - Forest & Wood Theme"}</title>
+<script>window.__VIEW_MODE__ = "${viewMode === "panel" ? "panel" : "dashboard"}";</script>
 <script src="https://cdn.tailwindcss.com"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 <style>
@@ -982,6 +986,10 @@ textarea,input,select{pointer-events:auto !important;user-select:text !important
       </h1>
       <p class="text-amber-200/70 text-sm mt-1">Host Worker Asli: <span class="text-amber-300 font-mono">${domain}</span></p>
       <p class="mt-2"><span class="inline-block text-[11px] font-bold px-2.5 py-1 rounded-full bg-emerald-900/70 border border-emerald-600 text-emerald-300">${VERSION_LABEL} • VMess AEAD Penuh</span></p>
+      <div class="flex flex-wrap gap-2 mt-3">
+        <a href="/" class="text-[11px] font-bold px-3 py-1.5 rounded-lg bg-[#120a05] border border-[#5a3d22] text-amber-200">Dashboard</a>
+        <a href="/panel" class="text-[11px] font-bold px-3 py-1.5 rounded-lg bg-emerald-800 border border-emerald-600 text-white">Panel Pantau</a>
+      </div>
     </div>
     <div class="flex items-center gap-2 bg-[#1c1107] px-4 py-2 rounded-xl border border-[#5a3d22]">
       <span id="statusPingDot" class="w-3 h-3 rounded-full bg-emerald-500 animate-pulse"></span>
@@ -990,7 +998,7 @@ textarea,input,select{pointer-events:auto !important;user-select:text !important
   </div>
 
   <!-- Generator -->
-  <div class="wood-card rounded-2xl p-6 mb-8">
+  <div id="generatorCard" class="wood-card rounded-2xl p-6 mb-8">
     <h2 class="text-lg font-semibold text-amber-200 mb-4 flex items-center gap-2">
       <i class="fa-solid fa-seedling text-emerald-400"></i> Generator Konfigurasi VMess WS
     </h2>
@@ -1108,8 +1116,8 @@ ${BUG_HOST_LIST.map(function(h){ return '          <option value="' + h + '">' +
   </div>
 
 
-  <!-- Panel Monitor v1.24 -->
-  <div class="wood-card rounded-2xl p-5 mt-4">
+  <!-- Panel Monitor v1.25 -->
+  <div id="panelCard" class="wood-card rounded-2xl p-5 mt-4">
     <div class="flex items-center justify-between mb-2">
       <span class="text-xs font-bold text-emerald-400 tracking-wider"><i class="fa-solid fa-gauge-high"></i> PANEL PANTAU &amp; BLOKIR UUID</span>
       <span id="panelStorage" class="text-[10px] text-amber-300/70"></span>
@@ -1118,14 +1126,15 @@ ${BUG_HOST_LIST.map(function(h){ return '          <option value="' + h + '">' +
       <input type="password" id="panelKeyInput" placeholder="Key panel (baris PANEL_KEY di atas file script)" class="flex-1 bg-[#120a05] border border-[#5a3d22] rounded-xl px-3 py-2 text-xs text-amber-100 font-mono focus:outline-none focus:border-emerald-500">
       <button onclick="panelOpen()" class="bg-emerald-800 hover:bg-emerald-700 text-white text-xs font-bold px-4 py-2 rounded-xl">Buka</button>
       <button onclick="panelRefresh()" class="bg-[#120a05] border border-[#5a3d22] text-amber-200 text-xs px-3 py-2 rounded-xl"><i class="fa-solid fa-rotate"></i></button>
+      <button onclick="panelClearPanel()" class="bg-[#120a05] border border-[#5a3d22] text-amber-200 text-xs px-3 py-2 rounded-xl">Bersih</button>
       <button onclick="panelForgetKey()" class="bg-[#120a05] border border-[#5a3d22] text-amber-200 text-xs px-3 py-2 rounded-xl">Lupa</button>
     </div>
-    <div id="panelMsg" class="text-[11px] text-amber-300/80 mb-2">Masukkan key panel sekali; key tersimpan di browser ini dan panel otomatis terbuka saat reload. Panel auto-refresh tiap 5 detik saat terbuka.</div>
+    <div id="panelMsg" class="text-[11px] text-amber-300/80 mb-2">Masukkan kode panel sekali saja di halaman /panel ini; kode tersimpan di browser ini, jadi berikutnya panel langsung terbuka tanpa tanya lagi. Tombol Lupa menghapus kode dari browser ini. Refresh hemat tiap 15 detik dan berhenti saat tab tidak terlihat.</div>
     <div id="panelWrap" class="hidden">
       <div class="grid grid-cols-2 gap-3">
         <div class="space-y-3 min-w-0">
           <div class="bg-[#120a05]/60 border border-[#3d2612] rounded-xl p-2">
-            <div class="text-[11px] font-bold text-emerald-300 mb-2">KONEKSI AKTIF (<span id="panelActiveCount">0</span>)</div>
+            <div class="text-[11px] font-bold text-emerald-300 mb-2">KONEKSI AKTIF (<span id="panelActiveCount">0</span> client • <span id="panelSessionCount">0</span> sesi)</div>
             <div id="panelActive" class="space-y-1.5 text-[11px]"></div>
           </div>
           <div class="bg-[#120a05]/60 border border-[#3d2612] rounded-xl p-2">
@@ -1160,7 +1169,7 @@ ${BUG_HOST_LIST.map(function(h){ return '          <option value="' + h + '">' +
           </div>
         </div>
       </div>
-      <p class="text-[10px] text-amber-300/50 mt-3">Versi ringan: koneksi yang sedang berjalan tidak diputus saat diblokir; UUID itu gagal pada koneksi berikutnya. Blokir awet hanya bila ada binding KV bernama PANEL_KV; tanpa KV, daftar blokir reset saat Worker restart/redeploy dan daftar aktif hanya memuat koneksi di isolate ini.</p>
+      <p class="text-[10px] text-amber-300/50 mt-3">Daftar aktif digabung per client agar tidak menggelembung; entri zombie lebih dari 30 menit dibersihkan dari tampilan. Tombol Bersih hanya membersihkan tampilan/log panel, tidak memutus koneksi yang sedang jalan. Blokir berlaku pada koneksi berikutnya.</p>
     </div>
   </div>
 
@@ -1340,6 +1349,18 @@ function copyToClipboard(id){
     el('statusPingDot').className = 'w-3 h-3 rounded-full bg-red-500';
   });
 })();
+function applyViewMode(){
+  var panelMode = window.__VIEW_MODE__ === 'panel';
+  var g = el('generatorCard'), p = el('panelCard'), o = el('outputContainer');
+  if (panelMode) {
+    if (g) g.style.display = 'none';
+    if (o) o.style.display = 'none';
+    if (p) p.style.display = '';
+  } else {
+    if (p) p.style.display = 'none';
+  }
+}
+applyViewMode();
 var panelKeyVal = localStorage.getItem('mv_panel_key') || '';
 var panelTimer = null;
 function panelOpen(){
@@ -1349,7 +1370,7 @@ function panelOpen(){
   el('panelWrap').classList.remove('hidden');
   panelRefresh();
   if (panelTimer) clearInterval(panelTimer);
-  panelTimer = setInterval(function(){ if (!el('panelWrap').classList.contains('hidden')) panelRefresh(); }, 5000);
+  panelTimer = setInterval(function(){ if (document.visibilityState === 'visible' && !el('panelWrap').classList.contains('hidden')) panelRefresh(); }, 15000);
 }
 function panelForgetKey(){
   panelKeyVal = '';
@@ -1361,7 +1382,7 @@ function panelForgetKey(){
   if (panelTimer) clearInterval(panelTimer);
 }
 function panelAutoOpenSaved(){
-  if (!panelKeyVal) return;
+  if (window.__VIEW_MODE__ !== 'panel' || !panelKeyVal) return;
   var inp = el('panelKeyInput');
   if (inp && !inp.value) inp.value = panelKeyVal;
   panelOpen();
@@ -1385,12 +1406,14 @@ async function panelRefresh(){
     el('panelStorage').textContent = j.storage || '';
     el('panelMsg').textContent = 'Panel aktif. Refresh terakhir ' + panelWaktu(j.now) + '.';
     el('panelActiveCount').textContent = j.active.length;
+    var sessionCount = el('panelSessionCount');
+    if (sessionCount) sessionCount.textContent = (typeof j.activeSessions === 'number') ? j.activeSessions : j.active.length;
     el('panelBlockedCount').textContent = j.blocked.length;
     var ah = '';
     if (!j.active.length) ah = '<div class="text-amber-300/50 italic">Tidak ada koneksi aktif di isolate ini.</div>';
     j.active.forEach(function(a){
       ah += '<div class="flex items-center justify-between gap-2 bg-[#120a05] border border-[#3d2612] rounded-lg px-2 py-1.5">'
-        + '<span class="font-mono text-emerald-200 break-all">' + panelEsc(String(a.proto).toUpperCase()) + ' - ' + panelEsc(a.id) + '<br><span class="text-amber-300/70">Server: ' + panelEsc(a.host || '-') + (a.path ? ' /' + panelEsc(a.path) : '') + '<br>Target: ' + panelEsc(a.target) + ' - ' + panelEsc(a.ip || '-') + ' ' + panelEsc(a.country || '') + ' - ' + panelDurasi(a.durasiDtk) + '</span></span>'
+        + '<span class="font-mono text-emerald-200 break-all">' + panelEsc(String(a.proto).toUpperCase()) + ' - ' + panelEsc(a.id) + '<br><span class="text-amber-300/70">Server: ' + panelEsc(a.host || '-') + (a.path ? ' /' + panelEsc(a.path) : '') + '<br>Target: ' + panelEsc(a.target) + ' - ' + panelEsc(a.ip || '-') + ' ' + panelEsc(a.country || '') + ' - ' + panelDurasi(a.durasiDtk) + (a.jumlah && a.jumlah > 1 ? ' • ' + a.jumlah + ' sesi' : '') + '</span></span>'
         + '<button data-pid="' + panelEsc(a.id) + '" onclick="panelBlock(this.dataset.pid)" class="shrink-0 bg-rose-800 hover:bg-rose-700 text-white text-[10px] font-bold px-2.5 py-1 rounded-lg">Blokir</button></div>';
     });
     el('panelActive').innerHTML = ah;
@@ -1450,12 +1473,17 @@ async function panelAddCurrentVmessUuid(){
   var v = el('userUuid').value.trim();
   if (!v) return;
   if (v.toLowerCase() === MASTER_UUID.toLowerCase()) { alert('Ini UUID master, tidak perlu ditambah.'); return; }
-  if (!panelKeyVal) { alert('Buka panel dulu sampai key tersimpan, lalu klik Add UUID VMess lagi.'); return; }
+  if (!panelKeyVal) { alert('Buka halaman Panel Pantau dulu, masukkan kode sekali sampai tersimpan, lalu klik Add UUID VMess lagi.'); return; }
   try {
     await panelApi('/__panel/api/vmess-add', { id: v });
     alert('UUID VMess terdaftar di panel. Client bisa konek tanpa edit script.');
     panelRefresh();
   } catch(e){ alert('Gagal daftar UUID VMess: ' + e.message); }
+}
+async function panelClearPanel(){
+  if (!panelKeyVal) { el('panelMsg').textContent = 'Masukkan kode panel dulu.'; return; }
+  if (!confirm('Bersihkan tampilan koneksi aktif dan log panel? Koneksi yang sedang jalan tidak diputus.')) return;
+  try { await panelApi('/__panel/api/clear-panel', {}); panelRefresh(); } catch(e){ alert('Gagal bersihkan panel: ' + e.message); }
 }
 async function panelClearLog(){
   try { await panelApi('/__panel/api/clear', {}); panelRefresh(); } catch(e){}
@@ -1530,11 +1558,26 @@ export default {
       if ((req.headers.get("x-panel-key") || "") !== PANEL_KEY) return jres({ error: "key panel salah" }, 401);
       if (url.pathname === "/__panel/api/status" && req.method === "GET") {
         const now = Date.now();
+        panelCleanupActive(now);
+        const groups = new Map();
+        for (const a of PANEL.active.values()) {
+          const key = [a.proto, a.id, a.host || "", a.path || ""].join("|");
+          let g = groups.get(key);
+          if (!g) {
+            g = { proto: a.proto, id: a.id, host: a.host || "", path: a.path || "", target: a.target, ip: a.ip || "", country: a.country || "", since: a.since, lastSince: a.since, jumlah: 0 };
+            groups.set(key, g);
+          }
+          g.jumlah++;
+          if (a.since < g.since) g.since = a.since;
+          if (a.since >= g.lastSince) { g.lastSince = a.since; g.target = a.target; g.ip = a.ip || ""; g.country = a.country || ""; }
+        }
+        const active = [...groups.values()].sort(function(x, y) { return y.lastSince - x.lastSince; }).slice(0, 100).map(function(g) { return Object.assign({}, g, { durasiDtk: Math.round((now - g.since) / 1000) }); });
         return jres({
           now: now,
           storage: panelKv ? "KV (awet)" : "memori (reset saat Worker restart)",
-          active: [...PANEL.active.values()].map(function(a) { return Object.assign({}, a, { durasiDtk: Math.round((now - a.since) / 1000) }); }),
-          recent: PANEL.recent,
+          active: active,
+          activeSessions: PANEL.active.size,
+          recent: PANEL.clearedAt ? PANEL.recent.filter(function(r) { return r.t > PANEL.clearedAt; }) : PANEL.recent,
           blocked: [...PANEL.blocked],
           vmessUuids: [...PANEL.vmessUuids]
         });
@@ -1578,11 +1621,24 @@ export default {
         PANEL.recent = [];
         return jres({ ok: true });
       }
+      if (url.pathname === "/__panel/api/clear-panel" && req.method === "POST") {
+        PANEL.clearedAt = Date.now();
+        PANEL.active.clear();
+        PANEL.recent = [];
+        return jres({ ok: true, clearedAt: PANEL.clearedAt });
+      }
       return jres({ error: "route panel tidak dikenal" }, 404);
     }
 
+    if (!isWs && (url.pathname === "/panel" || url.pathname === "/panel/")) {
+      return new Response(ConfigUI.render(url.hostname, "panel"), {
+        status: 200,
+        headers: { "content-type": "text/html;charset=UTF-8", "Cache-Control": "no-store" }
+      });
+    }
+
     if (url.pathname === "/" || url.pathname === "") {
-      return new Response(ConfigUI.render(url.hostname), {
+      return new Response(ConfigUI.render(url.hostname, "dashboard"), {
         status: 200,
         headers: { "content-type": "text/html;charset=UTF-8", "Cache-Control": "no-store" }
       });
@@ -1591,4 +1647,4 @@ export default {
   }
 };
 
-// ===== v1.24 - Muse VMess Panel UUID KV (basis v1.23) === END OF FILE v1.24 =====
+// ===== v1.25 Panel Terpisah =====
