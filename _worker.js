@@ -1,18 +1,24 @@
 // =====================================================================
-//  v1.21 - Muse VMess Panel Block Reload (karya orisinal Muse untuk Kancil)
-//  v1.21: basis v1.20; blocklist PANEL_KV sekarang dibaca ulang dari KV pada setiap koneksi WebSocket baru dan saat panel berubah, jadi UUID yang baru diblokir tidak lolos hanya karena isolate sudah memuat daftar lama di memori. Mesin VMess/VLESS/Trojan tidak diubah
+//  v1.24 - Muse VMess Panel UUID KV (karya orisinal Muse untuk Kancil)
+//  v1.24: basis v1.23; UUID VMess client sekarang bisa ditambah dari panel dan disimpan di PANEL_KV (key vmess_uuids), jadi menambah client VMess tidak perlu edit script/deploy ulang. USER_UUID tetap master; VMESS_CLIENT_UUIDS statis tetap didukung sebagai cadangan. Fitur block reload KV, UUID Master/Random, dan key panel tersimpan tetap
 //  (koneksi aktif per isolate, log aktivitas, blokir UUID/password;
 //  koneksi berjalan tidak diputus, blokir berlaku koneksi berikutnya)
 //  VMess AEAD PENUH di Cloudflare Pages/Worker: header + body terenkripsi
 //  (AES-128-GCM & ChaCha20-Poly1305), chunk framing + SHAKE-128 masking,
 //  bukan sekadar header seperti script nemu. Uji sandbox: klien VMess
 //  AEAD independen (443/80, AES/ChaCha) tembus end-to-end.
-//  Deploy: jadikan _worker.js di Pages. Atur USER_UUID di bawah.
+//  Deploy: jadikan _worker.js di Pages. Atur USER_UUID master dan VMESS_CLIENT_UUIDS di bawah.
 //  Port 80 (NTLS) butuh "Always Use HTTPS" OFF di zona domain kamu.
 // =====================================================================
 import { connect } from "cloudflare:sockets";
 
 const USER_UUID = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+// UUID VMess client tambahan selain USER_UUID master.
+// Cara utama sekarang: tambah dari panel dashboard, tersimpan di PANEL_KV.
+// Daftar statis ini hanya cadangan; UUID yang ditulis di sini ikut diterima
+// tanpa panel. VLESS dan Trojan random tidak perlu didaftarkan.
+const VMESS_CLIENT_UUIDS = [
+];
 
 // ===== DAFTAR BUG HOST =====
 // Tambah bug host baru: tulis satu baris baru di dalam kurung [ ] ini,
@@ -47,16 +53,16 @@ const PROXY_MAP = {
   "sg-ovh": "51.79.177.53:443"
 };
 
-const VERSION_LABEL = "v1.21 - Muse VMess Panel Block Reload";
-// ---------------- v1.21: PANEL PANTAU + BLOKIR UUID ----------------
+const VERSION_LABEL = "v1.24 - Muse VMess Panel UUID KV";
+// ---------------- v1.24: PANEL PANTAU + BLOKIR UUID ----------------
 // Key panel: ganti nilai PANEL_KEY ini sebelum deploy kalau mau key sendiri.
 // Panel dibuka dari dashboard utama (kartu "PANEL PANTAU & BLOKIR UUID").
 // Daftar blokir awet bila ada binding KV bernama PANEL_KV; tanpa KV hanya
 // di memori (reset saat Worker restart/redeploy). Koneksi yang sedang
 // berjalan TIDAK diputus saat diblokir; UUID gagal pada koneksi berikutnya.
 const PANEL_KEY = "kancil-c66eefd1f81d5aee";
-const PANEL = { active: new Map(), recent: [], blocked: new Set() };
-let panelSeq = 0, panelKv = null, panelKvReady = false, panelBlockedLoadedAt = 0;
+const PANEL = { active: new Map(), recent: [], blocked: new Set(), vmessUuids: new Set() };
+let panelSeq = 0, panelKv = null, panelKvReady = false, panelBlockedLoadedAt = 0, panelVmessLoadedAt = 0;
 function panelLog(action, info) {
   PANEL.recent.unshift(Object.assign({ t: Date.now(), action: action }, info || {}));
   if (PANEL.recent.length > 60) PANEL.recent.length = 60;
@@ -79,6 +85,28 @@ async function panelLoadBlocked(env, force) {
 async function panelSaveBlocked() {
   if (!panelKv) return;
   try { await panelKv.put("blocked", JSON.stringify([...PANEL.blocked])); } catch {}
+}
+async function panelLoadVmessUuids(env, force) {
+  panelKv = (env && env.PANEL_KV) ? env.PANEL_KV : panelKv;
+  if (!panelKv) { panelKvReady = true; return; }
+  const now = Date.now();
+  if (panelKvReady && !force && now - panelVmessLoadedAt < 10000) return;
+  try {
+    const raw = await panelKv.get("vmess_uuids");
+    const next = new Set();
+    if (raw) JSON.parse(raw).forEach(function(x) {
+      const v = String(x || "").trim().toLowerCase();
+      if (!v || v === USER_UUID.toLowerCase()) return;
+      try { parseUUID(v); next.add(v); } catch {}
+    });
+    PANEL.vmessUuids = next;
+    panelKvReady = true;
+    panelVmessLoadedAt = now;
+  } catch { panelKvReady = true; }
+}
+async function panelSaveVmessUuids() {
+  if (!panelKv) return;
+  try { await panelKv.put("vmess_uuids", JSON.stringify([...PANEL.vmessUuids])); } catch {}
 }
 function panelTrojanHash(val) {
   try { return hexEncode(sha224(TE.encode(val))); } catch { return ""; }
@@ -475,60 +503,84 @@ class ChunkEncoder {
 
 // ---------------- header VMess AEAD ----------------
 const VMESS_MAGIC = TE.encode("c48619fe-8f02-49e0-b9e9-edf763e17e21");
-let _basis = null;
-function vmessBasis() {
-  if (!_basis) _basis = md5(cat(parseUUID(USER_UUID), VMESS_MAGIC));
-  return _basis;
+const _vmessBasisCache = new Map();
+function vmessCandidateUuids() {
+  const out = [];
+  const seen = new Set();
+  [USER_UUID].concat(Array.isArray(VMESS_CLIENT_UUIDS) ? VMESS_CLIENT_UUIDS : [], [...PANEL.vmessUuids]).forEach(function(u) {
+    const v = String(u || "").trim().toLowerCase();
+    if (!v || seen.has(v)) return;
+    try { parseUUID(v); } catch { return; }
+    seen.add(v); out.push(v);
+  });
+  return out;
+}
+function vmessBasis(uuid) {
+  const key = String(uuid || USER_UUID).toLowerCase();
+  if (!_vmessBasisCache.has(key)) _vmessBasisCache.set(key, md5(cat(parseUUID(key), VMESS_MAGIC)));
+  return _vmessBasisCache.get(key);
 }
 
-// Kembalikan null bila byte belum cukup; lempar Error bila bukan VMess valid.
+// Kembalikan null bila byte belum cukup / tidak ada UUID VMess yang cocok.
 async function parseVmessHeader(buf) {
   if (buf.length < 42) return null;
   const auth = buf.subarray(0, 16), lenEnc = buf.subarray(16, 34), nonce = buf.subarray(34, 42);
-  const basis = vmessBasis();
-  const lk = vmessKDF(basis, "VMess Header AEAD Key_Length", auth, nonce).subarray(0, 16);
-  const li = vmessKDF(basis, "VMess Header AEAD Nonce_Length", auth, nonce).subarray(0, 12);
-  const lenPlain = await aesGcmOpen(lk, li, lenEnc, auth); // gagal = bukan VMess/UUID salah
-  const dataLen = rdU16(lenPlain, 0);
-  if (dataLen < 42 || dataLen > 4096) throw new Error("panjang header VMess invalid");
-  if (buf.length < 42 + dataLen + 16) return null;
-  const cmdEnc = buf.subarray(42, 42 + dataLen + 16);
-  const pk = vmessKDF(basis, "VMess Header AEAD Key", auth, nonce).subarray(0, 16);
-  const pi = vmessKDF(basis, "VMess Header AEAD Nonce", auth, nonce).subarray(0, 12);
-  const cmd = await aesGcmOpen(pk, pi, cmdEnc, auth);
-  if (cmd[0] !== 1) throw new Error("versi VMess tidak didukung");
-  const reqIV = cmd.subarray(1, 17), reqKey = cmd.subarray(17, 33);
-  const respV = cmd[33], opt = cmd[34], security = cmd[35] & 0x0f;
-  const command = cmd[37];
-  if (command !== 1 && command !== 2) throw new Error("command VMess invalid");
-  const port = rdU16(cmd, 38);
-  const atyp = cmd[40];
-  let host;
-  if (atyp === 1) host = [...cmd.subarray(41, 45)].join(".");
-  else if (atyp === 2) host = TD.decode(cmd.subarray(42, 42 + cmd[41]));
-  else if (atyp === 3) {
-    const parts = [];
-    for (let i = 0; i < 8; i++) parts.push(rdU16(cmd, 41 + i * 2).toString(16));
-    host = parts.join(":");
-  } else throw new Error("atyp VMess invalid");
-  if (![SEC_AES_GCM, SEC_CHACHA, SEC_NONE, SEC_ZERO].includes(security))
-    throw new Error("security VMess tidak didukung: " + security);
-  const respBodyKey = sha256(reqKey).subarray(0, 16);
-  const respBodyIV = sha256(reqIV).subarray(0, 16);
-  const h1 = await aesGcmSeal(
-    vmessKDF(respBodyKey, "AEAD Resp Header Len Key").subarray(0, 16),
-    vmessKDF(respBodyIV, "AEAD Resp Header Len IV").subarray(0, 12),
-    new Uint8Array([0, 4]), undefined);
-  const h2 = await aesGcmSeal(
-    vmessKDF(respBodyKey, "AEAD Resp Header Key").subarray(0, 16),
-    vmessKDF(respBodyIV, "AEAD Resp Header IV").subarray(0, 12),
-    new Uint8Array([respV, 0, 0, 0]), undefined);
-  return {
-    host, port, isUdp: command === 2, security, opt,
-    reqKey, reqIV, respBodyKey, respBodyIV,
-    replyHead: cat(h1, h2),
-    rest: buf.subarray(42 + dataLen + 16)
-  };
+  const candidates = vmessCandidateUuids();
+  for (const candidateUuid of candidates) {
+    const basis = vmessBasis(candidateUuid);
+    let lenPlain;
+    try {
+      const lk = vmessKDF(basis, "VMess Header AEAD Key_Length", auth, nonce).subarray(0, 16);
+      const li = vmessKDF(basis, "VMess Header AEAD Nonce_Length", auth, nonce).subarray(0, 12);
+      lenPlain = await aesGcmOpen(lk, li, lenEnc, auth); // gagal = UUID kandidat salah
+    } catch { continue; }
+    const dataLen = rdU16(lenPlain, 0);
+    if (dataLen < 42 || dataLen > 4096) continue;
+    if (buf.length < 42 + dataLen + 16) return null;
+    let cmd;
+    try {
+      const cmdEnc = buf.subarray(42, 42 + dataLen + 16);
+      const pk = vmessKDF(basis, "VMess Header AEAD Key", auth, nonce).subarray(0, 16);
+      const pi = vmessKDF(basis, "VMess Header AEAD Nonce", auth, nonce).subarray(0, 12);
+      cmd = await aesGcmOpen(pk, pi, cmdEnc, auth);
+    } catch { continue; }
+    try {
+      if (cmd[0] !== 1) continue;
+      const reqIV = cmd.subarray(1, 17), reqKey = cmd.subarray(17, 33);
+      const respV = cmd[33], opt = cmd[34], security = cmd[35] & 0x0f;
+      const command = cmd[37];
+      if (command !== 1 && command !== 2) continue;
+      const port = rdU16(cmd, 38);
+      const atyp = cmd[40];
+      let host;
+      if (atyp === 1) host = [...cmd.subarray(41, 45)].join(".");
+      else if (atyp === 2) host = TD.decode(cmd.subarray(42, 42 + cmd[41]));
+      else if (atyp === 3) {
+        const parts = [];
+        for (let i = 0; i < 8; i++) parts.push(rdU16(cmd, 41 + i * 2).toString(16));
+        host = parts.join(":");
+      } else continue;
+      if (![SEC_AES_GCM, SEC_CHACHA, SEC_NONE, SEC_ZERO].includes(security)) continue;
+      const respBodyKey = sha256(reqKey).subarray(0, 16);
+      const respBodyIV = sha256(reqIV).subarray(0, 16);
+      const h1 = await aesGcmSeal(
+        vmessKDF(respBodyKey, "AEAD Resp Header Len Key").subarray(0, 16),
+        vmessKDF(respBodyIV, "AEAD Resp Header Len IV").subarray(0, 12),
+        new Uint8Array([0, 4]), undefined);
+      const h2 = await aesGcmSeal(
+        vmessKDF(respBodyKey, "AEAD Resp Header Key").subarray(0, 16),
+        vmessKDF(respBodyIV, "AEAD Resp Header IV").subarray(0, 12),
+        new Uint8Array([respV, 0, 0, 0]), undefined);
+      return {
+        proto: "vmess", uuid: candidateUuid,
+        host, port, isUdp: command === 2, security, opt,
+        reqKey, reqIV, respBodyKey, respBodyIV,
+        replyHead: cat(h1, h2),
+        rest: buf.subarray(42 + dataLen + 16)
+      };
+    } catch { continue; }
+  }
+  return null;
 }
 
 
@@ -858,7 +910,8 @@ async function handleSession(serverWs, fallbackNode, meta) {
         sess.proto = sess.proto || "vmess";
         // v1.13 panel: identitas sesi + cek blokir UUID
         let panelId = USER_UUID;
-        if (sess.proto === "vless") panelId = uuidFromBytes(headerBuf.subarray(1, 17));
+        if (sess.proto === "vmess") panelId = sess.uuid || USER_UUID;
+        else if (sess.proto === "vless") panelId = uuidFromBytes(headerBuf.subarray(1, 17));
         else if (sess.proto === "trojan") panelId = TD.decode(headerBuf.subarray(0, 56)).toLowerCase();
         if (PANEL.blocked.has(panelId.toLowerCase())) {
           panelLog("ditolak-blokir", { proto: sess.proto, id: panelId, target: sess.host + ":" + sess.port });
@@ -1031,8 +1084,16 @@ ${BUG_HOST_LIST.map(function(h){ return '          <option value="' + h + '">' +
       <div class="flex justify-between items-center mb-1">
         <label class="block text-xs font-medium text-amber-300/80">UUID / Secret Key</label>
         <button onclick="regenUUID()" class="text-xs text-emerald-400 hover:text-emerald-300 flex items-center gap-1 font-semibold">
-          <i class="fa-solid fa-arrows-rotate"></i> Acak UUID Baru (Remake)
+          <i class="fa-solid fa-arrows-rotate"></i> Acak UUID Baru
         </button>
+      </div>
+      <div class="flex flex-wrap items-center gap-2 mb-2">
+        <select id="uuidModeSelect" onchange="setUuidMode(this.value)" class="bg-[#120a05] border border-[#5a3d22] rounded-xl px-3 py-2 text-xs text-amber-100 focus:outline-none focus:border-emerald-500 font-mono">
+          <option value="master" selected>UUID Master</option>
+          <option value="random">UUID Random</option>
+        </select>
+        <span id="uuidModeHint" class="text-[11px] text-amber-300/60">Master: UUID utama script. Random: UUID client baru.</span>
+        <button onclick="panelAddCurrentVmessUuid()" class="shrink-0 bg-emerald-800 hover:bg-emerald-700 text-white text-[11px] font-bold px-3 py-2 rounded-xl">Add UUID VMess</button>
       </div>
       <div class="flex gap-2">
         <input type="text" id="userUuid" value="${USER_UUID}" oninput="onUuidInput()" class="flex-1 bg-[#120a05] border border-[#5a3d22] rounded-xl px-4 py-2.5 text-sm text-amber-100 focus:outline-none focus:border-emerald-500 font-mono">
@@ -1043,11 +1104,11 @@ ${BUG_HOST_LIST.map(function(h){ return '          <option value="' + h + '">' +
     <button onclick="generateLinks()" class="w-full bg-gradient-to-r from-amber-700 to-emerald-700 hover:from-amber-600 hover:to-emerald-600 text-white font-bold py-2.5 rounded-xl transition duration-200 text-sm shadow-lg shadow-black/40">
       Generate Config Rapi
     </button>
-    <p class="text-[11px] text-amber-300/60 mt-3">Catatan: UUID harus sama dengan USER_UUID di script (khusus VMess; VLESS terima UUID apa pun). Password Trojan otomatis sama dengan UUID (edit manual kalau mau beda). DNS tidak bocor = nyalakan Custom DNS di apk (1.1.1.1). Port 80 = matikan "Always Use HTTPS" di zona domain.</p>
+    <p class="text-[11px] text-amber-300/60 mt-3">Catatan UUID: Master = USER_UUID utama. Random = UUID client baru; VLESS/Trojan random langsung bisa dipakai. Untuk VMess random, klik Add UUID ini atau tambah dari panel agar tersimpan di PANEL_KV, tanpa edit script. Password Trojan otomatis sama dengan UUID (edit manual kalau mau beda). DNS tidak bocor = nyalakan Custom DNS di apk (1.1.1.1). Port 80 = matikan "Always Use HTTPS" di zona domain.</p>
   </div>
 
 
-  <!-- Panel Monitor v1.21 -->
+  <!-- Panel Monitor v1.24 -->
   <div class="wood-card rounded-2xl p-5 mt-4">
     <div class="flex items-center justify-between mb-2">
       <span class="text-xs font-bold text-emerald-400 tracking-wider"><i class="fa-solid fa-gauge-high"></i> PANEL PANTAU &amp; BLOKIR UUID</span>
@@ -1057,8 +1118,9 @@ ${BUG_HOST_LIST.map(function(h){ return '          <option value="' + h + '">' +
       <input type="password" id="panelKeyInput" placeholder="Key panel (baris PANEL_KEY di atas file script)" class="flex-1 bg-[#120a05] border border-[#5a3d22] rounded-xl px-3 py-2 text-xs text-amber-100 font-mono focus:outline-none focus:border-emerald-500">
       <button onclick="panelOpen()" class="bg-emerald-800 hover:bg-emerald-700 text-white text-xs font-bold px-4 py-2 rounded-xl">Buka</button>
       <button onclick="panelRefresh()" class="bg-[#120a05] border border-[#5a3d22] text-amber-200 text-xs px-3 py-2 rounded-xl"><i class="fa-solid fa-rotate"></i></button>
+      <button onclick="panelForgetKey()" class="bg-[#120a05] border border-[#5a3d22] text-amber-200 text-xs px-3 py-2 rounded-xl">Lupa</button>
     </div>
-    <div id="panelMsg" class="text-[11px] text-amber-300/80 mb-2">Masukkan key panel untuk melihat koneksi aktif, aktivitas terakhir, dan daftar blokir. Panel auto-refresh tiap 5 detik saat terbuka.</div>
+    <div id="panelMsg" class="text-[11px] text-amber-300/80 mb-2">Masukkan key panel sekali; key tersimpan di browser ini dan panel otomatis terbuka saat reload. Panel auto-refresh tiap 5 detik saat terbuka.</div>
     <div id="panelWrap" class="hidden">
       <div class="grid grid-cols-2 gap-3">
         <div class="space-y-3 min-w-0">
@@ -1086,6 +1148,15 @@ ${BUG_HOST_LIST.map(function(h){ return '          <option value="' + h + '">' +
           <div class="bg-[#120a05]/60 border border-[#3d2612] rounded-xl p-2">
             <div class="text-[11px] font-bold text-rose-300 mb-2">DIBLOKIR (<span id="panelBlockedCount">0</span>)</div>
             <div id="panelBlocked" class="space-y-1.5 text-[11px]"></div>
+          </div>
+          <div class="bg-[#120a05]/60 border border-[#3d2612] rounded-xl p-2">
+            <div class="text-[11px] font-bold text-emerald-300 mb-2">UUID VMESS CLIENT (<span id="panelVmessCount">0</span>)</div>
+            <div class="flex gap-2">
+              <input type="text" id="panelVmessInput" placeholder="UUID VMess client" class="flex-1 bg-[#120a05] border border-[#5a3d22] rounded-xl px-3 py-2 text-xs text-amber-100 font-mono focus:outline-none focus:border-emerald-500">
+              <button onclick="panelAddVmessManual()" class="shrink-0 bg-emerald-800 hover:bg-emerald-700 text-white text-xs font-bold px-4 py-2 rounded-xl">Add</button>
+            </div>
+            <p class="text-[10px] text-amber-300/50 mt-2">UUID di sini tersimpan di PANEL_KV; client VMess bisa konek tanpa edit script.</p>
+            <div id="panelVmess" class="space-y-1.5 text-[11px] mt-2"></div>
           </div>
         </div>
       </div>
@@ -1129,6 +1200,7 @@ ${BUG_HOST_LIST.map(function(h){ return '          <option value="' + h + '">' +
 
 <script>
 var currentHostDefault = "${domain}";
+var MASTER_UUID = "${USER_UUID}";
 function el(id){ return document.getElementById(id); }
 function syncPathInput(){
   var sel = el('proxySelect');
@@ -1143,8 +1215,32 @@ function applyWildcardPreset(){
   if (v) { el('bugHost').value = v; generateLinks(); }
 }
 var trojanPassDirty = false;
+function uuidModeHintText(){
+  var mode = el('uuidModeSelect') ? el('uuidModeSelect').value : 'master';
+  var proto = el('protoSelect') ? el('protoSelect').value : 'vmess';
+  if (mode === 'master') return 'Master: memakai UUID utama script.';
+  if (proto === 'vmess') return 'Random: klik Add UUID VMess agar tersimpan di panel/KV.';
+  return 'Random: UUID client baru, langsung bisa untuk VLESS/Trojan.';
+}
+function syncUuidModeFromInput(){
+  var sel = el('uuidModeSelect');
+  if (sel) {
+    var v = el('userUuid').value.trim().toLowerCase();
+    sel.value = (v === MASTER_UUID.toLowerCase()) ? 'master' : 'random';
+  }
+  var h = el('uuidModeHint');
+  if (h) h.textContent = uuidModeHintText();
+}
+function setUuidMode(mode){
+  var sel = el('uuidModeSelect');
+  if (sel) sel.value = mode;
+  trojanPassDirty = false;
+  el('userUuid').value = (mode === 'master') ? MASTER_UUID : crypto.randomUUID();
+  onUuidInput();
+}
 function onUuidInput(){
   if (!trojanPassDirty) el('trojanPass').value = el('userUuid').value;
+  syncUuidModeFromInput();
   generateLinks();
 }
 function onTrojanPassInput(){
@@ -1152,12 +1248,16 @@ function onTrojanPassInput(){
   generateLinks();
 }
 function regenUUID(){
+  var sel = el('uuidModeSelect');
+  if (sel) sel.value = 'random';
+  trojanPassDirty = false;
   el('userUuid').value = crypto.randomUUID();
   onUuidInput();
 }
 function b64(str){ return btoa(unescape(encodeURIComponent(str))); }
 function setOut(id,val){ var n = el(id); if (n) n.value = val; }
 function generateLinks(){
+  syncUuidModeFromInput();
   var proto = el('protoSelect').value;
   var method = el('methodSelect').value;
   var port = el('portSelect').value;
@@ -1251,6 +1351,22 @@ function panelOpen(){
   if (panelTimer) clearInterval(panelTimer);
   panelTimer = setInterval(function(){ if (!el('panelWrap').classList.contains('hidden')) panelRefresh(); }, 5000);
 }
+function panelForgetKey(){
+  panelKeyVal = '';
+  localStorage.removeItem('mv_panel_key');
+  el('panelKeyInput').value = '';
+  el('panelWrap').classList.add('hidden');
+  el('panelStorage').textContent = '';
+  el('panelMsg').textContent = 'Key panel sudah dihapus dari browser ini. Masukkan lagi bila mau membuka panel.';
+  if (panelTimer) clearInterval(panelTimer);
+}
+function panelAutoOpenSaved(){
+  if (!panelKeyVal) return;
+  var inp = el('panelKeyInput');
+  if (inp && !inp.value) inp.value = panelKeyVal;
+  panelOpen();
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', panelAutoOpenSaved); else panelAutoOpenSaved();
 function panelEsc(s){ return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/'/g,'&#39;').replace(/"/g,'&quot;'); }
 function panelWaktu(t){ try { return new Date(t).toLocaleTimeString('id-ID'); } catch(e){ return ''; } }
 function panelDurasi(s){ s = Math.max(0, s|0); if (s < 60) return s + ' dtk'; var m = Math.floor(s/60); if (m < 60) return m + ' mnt'; return Math.floor(m/60) + ' jam ' + (m % 60) + ' mnt'; }
@@ -1285,6 +1401,17 @@ async function panelRefresh(){
         + '<button data-pid="' + panelEsc(b) + '" onclick="panelUnblock(this.dataset.pid)" class="shrink-0 bg-emerald-800 hover:bg-emerald-700 text-white text-[10px] font-bold px-2.5 py-1 rounded-lg">Lepas</button></div>';
     });
     el('panelBlocked').innerHTML = bh;
+    var vlist = j.vmessUuids || [];
+    var vmessCount = el('panelVmessCount');
+    if (vmessCount) vmessCount.textContent = vlist.length;
+    var vh = '';
+    if (!vlist.length) vh = '<div class="text-amber-300/50 italic">Belum ada UUID VMess client dari panel.</div>';
+    vlist.forEach(function(b){
+      vh += '<div class="flex items-center justify-between gap-2 bg-[#120a05] border border-[#3d2612] rounded-lg px-2 py-1.5"><span class="font-mono text-emerald-200 break-all">' + panelEsc(b) + '</span>'
+        + '<button data-pid="' + panelEsc(b) + '" onclick="panelRemoveVmessUuid(this.dataset.pid)" class="shrink-0 bg-rose-800 hover:bg-rose-700 text-white text-[10px] font-bold px-2.5 py-1 rounded-lg">Hapus</button></div>';
+    });
+    var vmessBox = el('panelVmess');
+    if (vmessBox) vmessBox.innerHTML = vh;
     var rh = '';
     if (!j.recent.length) rh = '<div class="text-amber-300/50 italic">Belum ada aktivitas tercatat.</div>';
     j.recent.forEach(function(r){
@@ -1306,6 +1433,29 @@ function panelBlockManual(){
   if (!v) return;
   el('panelBlockInput').value = '';
   panelBlock(v);
+}
+async function panelAddVmessUuid(id){
+  try { await panelApi('/__panel/api/vmess-add', { id: id }); panelRefresh(); } catch(e){ alert('Gagal tambah UUID VMess: ' + e.message); }
+}
+async function panelRemoveVmessUuid(id){
+  try { await panelApi('/__panel/api/vmess-remove', { id: id }); panelRefresh(); } catch(e){ alert('Gagal hapus UUID VMess: ' + e.message); }
+}
+function panelAddVmessManual(){
+  var v = el('panelVmessInput').value.trim();
+  if (!v) return;
+  el('panelVmessInput').value = '';
+  panelAddVmessUuid(v);
+}
+async function panelAddCurrentVmessUuid(){
+  var v = el('userUuid').value.trim();
+  if (!v) return;
+  if (v.toLowerCase() === MASTER_UUID.toLowerCase()) { alert('Ini UUID master, tidak perlu ditambah.'); return; }
+  if (!panelKeyVal) { alert('Buka panel dulu sampai key tersimpan, lalu klik Add UUID VMess lagi.'); return; }
+  try {
+    await panelApi('/__panel/api/vmess-add', { id: v });
+    alert('UUID VMess terdaftar di panel. Client bisa konek tanpa edit script.');
+    panelRefresh();
+  } catch(e){ alert('Gagal daftar UUID VMess: ' + e.message); }
 }
 async function panelClearLog(){
   try { await panelApi('/__panel/api/clear', {}); panelRefresh(); } catch(e){}
@@ -1344,6 +1494,7 @@ export default {
       server.accept();
 
       await panelLoadBlocked(env, true);
+      await panelLoadVmessUuids(env, true);
       const panelMeta = { host: url.hostname, ip: req.headers.get("CF-Connecting-IP") || "", country: (req.cf && req.cf.country) || req.headers.get("CF-IPCountry") || "", path: rawPath };
       const session = await handleSession(server, fallbackNode, panelMeta);
       const ed = req.headers.get("sec-websocket-protocol");
@@ -1374,6 +1525,7 @@ export default {
     // v1.13: API panel pantau + blokir UUID
     if (url.pathname.startsWith("/__panel/")) {
       await panelLoadBlocked(env, req.method === "POST");
+      await panelLoadVmessUuids(env, req.method === "POST");
       const jres = (o, s) => new Response(JSON.stringify(o), { status: s || 200, headers: { "content-type": "application/json", "Cache-Control": "no-store" } });
       if ((req.headers.get("x-panel-key") || "") !== PANEL_KEY) return jres({ error: "key panel salah" }, 401);
       if (url.pathname === "/__panel/api/status" && req.method === "GET") {
@@ -1383,7 +1535,8 @@ export default {
           storage: panelKv ? "KV (awet)" : "memori (reset saat Worker restart)",
           active: [...PANEL.active.values()].map(function(a) { return Object.assign({}, a, { durasiDtk: Math.round((now - a.since) / 1000) }); }),
           recent: PANEL.recent,
-          blocked: [...PANEL.blocked]
+          blocked: [...PANEL.blocked],
+          vmessUuids: [...PANEL.vmessUuids]
         });
       }
       let pbody = {};
@@ -1406,6 +1559,21 @@ export default {
         panelLog("lepas-blokir", { id: val });
         return jres({ ok: true, blocked: [...PANEL.blocked] });
       }
+      if (url.pathname === "/__panel/api/vmess-add" && req.method === "POST") {
+        if (!val) return jres({ error: "uuid kosong" }, 400);
+        try { parseUUID(val); } catch { return jres({ error: "UUID tidak valid" }, 400); }
+        if (val === USER_UUID.toLowerCase()) return jres({ ok: true, master: true, vmessUuids: [...PANEL.vmessUuids] });
+        PANEL.vmessUuids.add(val);
+        await panelSaveVmessUuids();
+        panelLog("tambah-vmess", { id: val });
+        return jres({ ok: true, vmessUuids: [...PANEL.vmessUuids] });
+      }
+      if (url.pathname === "/__panel/api/vmess-remove" && req.method === "POST") {
+        PANEL.vmessUuids.delete(val);
+        await panelSaveVmessUuids();
+        panelLog("hapus-vmess", { id: val });
+        return jres({ ok: true, vmessUuids: [...PANEL.vmessUuids] });
+      }
       if (url.pathname === "/__panel/api/clear" && req.method === "POST") {
         PANEL.recent = [];
         return jres({ ok: true });
@@ -1423,4 +1591,4 @@ export default {
   }
 };
 
-// ===== v1.21 - Muse VMess Panel Block Reload (basis v1.20) === END OF FILE v1.21 =====
+// ===== v1.24 - Muse VMess Panel UUID KV (basis v1.23) === END OF FILE v1.24 =====
