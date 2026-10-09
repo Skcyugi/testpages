@@ -1,6 +1,6 @@
 // =====================================================================
-//  v1.19 - Muse VMess Remake Name (karya orisinal Muse untuk Kancil)
-//  v1.19: basis v1.18; koreksi baris Remake pada HASIL GENERATE: isinya NAMA config/remarks (contoh VMess-id-dnva-443), BUKAN link. Link tetap ada di kartu Link Config di bawahnya
+//  v1.20 - Muse VMess Panel Server (karya orisinal Muse untuk Kancil)
+//  v1.20: basis v1.19; panel koneksi aktif sekarang menampilkan UUID + SERVER/domain host yang dipakai masuk (host request) + path + target tujuan, biar koneksi metode Websocket/Wildcard kelihatan domain servernya
 //  (koneksi aktif per isolate, log aktivitas, blokir UUID/password;
 //  koneksi berjalan tidak diputus, blokir berlaku koneksi berikutnya)
 //  VMess AEAD PENUH di Cloudflare Pages/Worker: header + body terenkripsi
@@ -47,8 +47,8 @@ const PROXY_MAP = {
   "sg-ovh": "51.79.177.53:443"
 };
 
-const VERSION_LABEL = "v1.19 - Muse VMess Remake Name";
-// ---------------- v1.19: PANEL PANTAU + BLOKIR UUID ----------------
+const VERSION_LABEL = "v1.20 - Muse VMess Panel Server";
+// ---------------- v1.20: PANEL PANTAU + BLOKIR UUID ----------------
 // Key panel: ganti nilai PANEL_KEY ini sebelum deploy kalau mau key sendiri.
 // Panel dibuka dari dashboard utama (kartu "PANEL PANTAU & BLOKIR UUID").
 // Daftar blokir awet bila ada binding KV bernama PANEL_KV; tanpa KV hanya
@@ -84,8 +84,8 @@ function uuidFromBytes(b) {
 }
 function panelRegister(meta, proto, id, target) {
   const sid = ++panelSeq;
-  PANEL.active.set(sid, { sid: sid, proto: proto, id: id, target: target, ip: meta.ip || "", country: meta.country || "", path: meta.path || "", since: Date.now() });
-  panelLog("konek", { proto: proto, id: id, target: target });
+  PANEL.active.set(sid, { sid: sid, proto: proto, id: id, target: target, host: meta.host || "", ip: meta.ip || "", country: meta.country || "", path: meta.path || "", since: Date.now() });
+  panelLog("konek", { proto: proto, id: id, target: target, host: meta.host || "", path: meta.path || "" });
   return sid;
 }
 
@@ -1042,7 +1042,7 @@ ${BUG_HOST_LIST.map(function(h){ return '          <option value="' + h + '">' +
   </div>
 
 
-  <!-- Panel Monitor v1.19 -->
+  <!-- Panel Monitor v1.20 -->
   <div class="wood-card rounded-2xl p-5 mt-4">
     <div class="flex items-center justify-between mb-2">
       <span class="text-xs font-bold text-emerald-400 tracking-wider"><i class="fa-solid fa-gauge-high"></i> PANEL PANTAU &amp; BLOKIR UUID</span>
@@ -1269,7 +1269,7 @@ async function panelRefresh(){
     if (!j.active.length) ah = '<div class="text-amber-300/50 italic">Tidak ada koneksi aktif di isolate ini.</div>';
     j.active.forEach(function(a){
       ah += '<div class="flex items-center justify-between gap-2 bg-[#120a05] border border-[#3d2612] rounded-lg px-2 py-1.5">'
-        + '<span class="font-mono text-emerald-200 break-all">' + panelEsc(String(a.proto).toUpperCase()) + ' - ' + panelEsc(a.id) + '<br><span class="text-amber-300/70">' + panelEsc(a.target) + ' - ' + panelEsc(a.ip || '-') + ' ' + panelEsc(a.country || '') + ' - ' + panelDurasi(a.durasiDtk) + '</span></span>'
+        + '<span class="font-mono text-emerald-200 break-all">' + panelEsc(String(a.proto).toUpperCase()) + ' - ' + panelEsc(a.id) + '<br><span class="text-amber-300/70">Server: ' + panelEsc(a.host || '-') + (a.path ? ' /' + panelEsc(a.path) : '') + '<br>Target: ' + panelEsc(a.target) + ' - ' + panelEsc(a.ip || '-') + ' ' + panelEsc(a.country || '') + ' - ' + panelDurasi(a.durasiDtk) + '</span></span>'
         + '<button data-pid="' + panelEsc(a.id) + '" onclick="panelBlock(this.dataset.pid)" class="shrink-0 bg-rose-800 hover:bg-rose-700 text-white text-[10px] font-bold px-2.5 py-1 rounded-lg">Blokir</button></div>';
     });
     el('panelActive').innerHTML = ah;
@@ -1283,7 +1283,7 @@ async function panelRefresh(){
     var rh = '';
     if (!j.recent.length) rh = '<div class="text-amber-300/50 italic">Belum ada aktivitas tercatat.</div>';
     j.recent.forEach(function(r){
-      rh += '<div class="font-mono text-amber-200/80 break-all">' + panelWaktu(r.t) + ' - ' + panelEsc(r.action) + ' - ' + panelEsc(r.proto || '') + ' ' + panelEsc(r.id || '') + ' ' + panelEsc(r.target || '') + '</div>';
+      rh += '<div class="font-mono text-amber-200/80 break-all">' + panelWaktu(r.t) + ' - ' + panelEsc(r.action) + ' - ' + panelEsc(r.proto || '') + ' ' + panelEsc(r.id || '') + (r.host ? ' @ ' + panelEsc(r.host) : '') + (r.path ? ' /' + panelEsc(r.path) : '') + ' -> ' + panelEsc(r.target || '') + '</div>';
     });
     el('panelRecent').innerHTML = rh;
   } catch(e) {
@@ -1339,7 +1339,7 @@ export default {
       server.accept();
 
       await panelLoadBlocked(env);
-      const panelMeta = { ip: req.headers.get("CF-Connecting-IP") || "", country: (req.cf && req.cf.country) || req.headers.get("CF-IPCountry") || "", path: rawPath };
+      const panelMeta = { host: url.hostname, ip: req.headers.get("CF-Connecting-IP") || "", country: (req.cf && req.cf.country) || req.headers.get("CF-IPCountry") || "", path: rawPath };
       const session = await handleSession(server, fallbackNode, panelMeta);
       const ed = req.headers.get("sec-websocket-protocol");
       if (ed) {
@@ -1418,4 +1418,4 @@ export default {
   }
 };
 
-// ===== v1.19 - Muse VMess Remake Name (basis v1.18) === END OF FILE v1.19 =====
+// ===== v1.20 - Muse VMess Panel Server (basis v1.19) === END OF FILE v1.20 =====
