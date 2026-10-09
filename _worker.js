@@ -1,13 +1,6 @@
 // =====================================================================
 //  v1.20 - Muse VMess Panel Server (karya orisinal Muse untuk Kancil)
 //  v1.20: basis v1.19; panel koneksi aktif sekarang menampilkan UUID + SERVER/domain host yang dipakai masuk (host request) + path + target tujuan, biar koneksi metode Websocket/Wildcard kelihatan domain servernya
-//  (koneksi aktif per isolate, log aktivitas, blokir UUID/password;
-//  koneksi berjalan tidak diputus, blokir berlaku koneksi berikutnya)
-//  VMess AEAD PENUH di Cloudflare Pages/Worker: header + body terenkripsi
-//  (AES-128-GCM & ChaCha20-Poly1305), chunk framing + SHAKE-128 masking,
-//  bukan sekadar header seperti script nemu. Uji sandbox: klien VMess
-//  AEAD independen (443/80, AES/ChaCha) tembus end-to-end.
-//  Deploy: jadikan _worker.js di Pages. Atur USER_UUID di bawah.
 //  Port 80 (NTLS) butuh "Always Use HTTPS" OFF di zona domain kamu.
 // =====================================================================
 import { connect } from "cloudflare:sockets";
