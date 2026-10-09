@@ -1,6 +1,13 @@
 // =====================================================================
-//  v1.20 - Muse VMess Panel Server (karya orisinal Muse untuk Kancil)
-//  v1.20: basis v1.19; panel koneksi aktif sekarang menampilkan UUID + SERVER/domain host yang dipakai masuk (host request) + path + target tujuan, biar koneksi metode Websocket/Wildcard kelihatan domain servernya
+//  v1.21 - Muse VMess Panel Block Reload (karya orisinal Muse untuk Kancil)
+//  v1.21: basis v1.20; blocklist PANEL_KV sekarang dibaca ulang dari KV pada setiap koneksi WebSocket baru dan saat panel berubah, jadi UUID yang baru diblokir tidak lolos hanya karena isolate sudah memuat daftar lama di memori. Mesin VMess/VLESS/Trojan tidak diubah
+//  (koneksi aktif per isolate, log aktivitas, blokir UUID/password;
+//  koneksi berjalan tidak diputus, blokir berlaku koneksi berikutnya)
+//  VMess AEAD PENUH di Cloudflare Pages/Worker: header + body terenkripsi
+//  (AES-128-GCM & ChaCha20-Poly1305), chunk framing + SHAKE-128 masking,
+//  bukan sekadar header seperti script nemu. Uji sandbox: klien VMess
+//  AEAD independen (443/80, AES/ChaCha) tembus end-to-end.
+//  Deploy: jadikan _worker.js di Pages. Atur USER_UUID di bawah.
 //  Port 80 (NTLS) butuh "Always Use HTTPS" OFF di zona domain kamu.
 // =====================================================================
 import { connect } from "cloudflare:sockets";
@@ -40,8 +47,8 @@ const PROXY_MAP = {
   "sg-ovh": "51.79.177.53:443"
 };
 
-const VERSION_LABEL = "v1.20 - Muse VMess Panel Server";
-// ---------------- v1.20: PANEL PANTAU + BLOKIR UUID ----------------
+const VERSION_LABEL = "v1.21 - Muse VMess Panel Block Reload";
+// ---------------- v1.21: PANEL PANTAU + BLOKIR UUID ----------------
 // Key panel: ganti nilai PANEL_KEY ini sebelum deploy kalau mau key sendiri.
 // Panel dibuka dari dashboard utama (kartu "PANEL PANTAU & BLOKIR UUID").
 // Daftar blokir awet bila ada binding KV bernama PANEL_KV; tanpa KV hanya
@@ -49,20 +56,25 @@ const VERSION_LABEL = "v1.20 - Muse VMess Panel Server";
 // berjalan TIDAK diputus saat diblokir; UUID gagal pada koneksi berikutnya.
 const PANEL_KEY = "kancil-c66eefd1f81d5aee";
 const PANEL = { active: new Map(), recent: [], blocked: new Set() };
-let panelSeq = 0, panelKv = null, panelKvReady = false;
+let panelSeq = 0, panelKv = null, panelKvReady = false, panelBlockedLoadedAt = 0;
 function panelLog(action, info) {
   PANEL.recent.unshift(Object.assign({ t: Date.now(), action: action }, info || {}));
   if (PANEL.recent.length > 60) PANEL.recent.length = 60;
 }
-async function panelLoadBlocked(env) {
-  if (panelKvReady) return;
-  panelKvReady = true;
-  panelKv = (env && env.PANEL_KV) ? env.PANEL_KV : null;
-  if (!panelKv) return;
+async function panelLoadBlocked(env, force) {
+  panelKv = (env && env.PANEL_KV) ? env.PANEL_KV : panelKv;
+  if (!panelKv) { panelKvReady = true; return; }
+  const now = Date.now();
+  // Status panel cukup refresh berkala; koneksi baru & aksi block/unblock wajib force.
+  if (panelKvReady && !force && now - panelBlockedLoadedAt < 10000) return;
   try {
     const raw = await panelKv.get("blocked");
-    if (raw) JSON.parse(raw).forEach(function(x) { PANEL.blocked.add(String(x).toLowerCase()); });
-  } catch {}
+    const next = new Set();
+    if (raw) JSON.parse(raw).forEach(function(x) { next.add(String(x).toLowerCase()); });
+    PANEL.blocked = next;
+    panelKvReady = true;
+    panelBlockedLoadedAt = now;
+  } catch { panelKvReady = true; }
 }
 async function panelSaveBlocked() {
   if (!panelKv) return;
@@ -1035,7 +1047,7 @@ ${BUG_HOST_LIST.map(function(h){ return '          <option value="' + h + '">' +
   </div>
 
 
-  <!-- Panel Monitor v1.20 -->
+  <!-- Panel Monitor v1.21 -->
   <div class="wood-card rounded-2xl p-5 mt-4">
     <div class="flex items-center justify-between mb-2">
       <span class="text-xs font-bold text-emerald-400 tracking-wider"><i class="fa-solid fa-gauge-high"></i> PANEL PANTAU &amp; BLOKIR UUID</span>
@@ -1331,7 +1343,7 @@ export default {
       const [client, server] = Object.values(pair);
       server.accept();
 
-      await panelLoadBlocked(env);
+      await panelLoadBlocked(env, true);
       const panelMeta = { host: url.hostname, ip: req.headers.get("CF-Connecting-IP") || "", country: (req.cf && req.cf.country) || req.headers.get("CF-IPCountry") || "", path: rawPath };
       const session = await handleSession(server, fallbackNode, panelMeta);
       const ed = req.headers.get("sec-websocket-protocol");
@@ -1361,7 +1373,7 @@ export default {
 
     // v1.13: API panel pantau + blokir UUID
     if (url.pathname.startsWith("/__panel/")) {
-      await panelLoadBlocked(env);
+      await panelLoadBlocked(env, req.method === "POST");
       const jres = (o, s) => new Response(JSON.stringify(o), { status: s || 200, headers: { "content-type": "application/json", "Cache-Control": "no-store" } });
       if ((req.headers.get("x-panel-key") || "") !== PANEL_KEY) return jres({ error: "key panel salah" }, 401);
       if (url.pathname === "/__panel/api/status" && req.method === "GET") {
@@ -1411,4 +1423,4 @@ export default {
   }
 };
 
-// ===== v1.20 - Muse VMess Panel Server (basis v1.19) === END OF FILE v1.20 =====
+// ===== v1.21 - Muse VMess Panel Block Reload (basis v1.20) === END OF FILE v1.21 =====
