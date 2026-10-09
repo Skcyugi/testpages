@@ -1,6 +1,6 @@
 // =====================================================================
-//  v1.18 - Muse VMess Hasil Simple (karya orisinal Muse untuk Kancil)
-//  v1.18: basis v1.16 yang terbukti aman di Pages; HASIL GENERATE dibuat simple satu blok teks: garis, nama config, Remake, Uuid, Protokol, port, Path
+//  v1.19 - Muse VMess Remake Name (karya orisinal Muse untuk Kancil)
+//  v1.19: basis v1.18; koreksi baris Remake pada HASIL GENERATE: isinya NAMA config/remarks (contoh VMess-id-dnva-443), BUKAN link. Link tetap ada di kartu Link Config di bawahnya
 //  (koneksi aktif per isolate, log aktivitas, blokir UUID/password;
 //  koneksi berjalan tidak diputus, blokir berlaku koneksi berikutnya)
 //  VMess AEAD PENUH di Cloudflare Pages/Worker: header + body terenkripsi
@@ -47,8 +47,8 @@ const PROXY_MAP = {
   "sg-ovh": "51.79.177.53:443"
 };
 
-const VERSION_LABEL = "v1.18 - Muse VMess Hasil Simple";
-// ---------------- v1.18: PANEL PANTAU + BLOKIR UUID ----------------
+const VERSION_LABEL = "v1.19 - Muse VMess Remake Name";
+// ---------------- v1.19: PANEL PANTAU + BLOKIR UUID ----------------
 // Key panel: ganti nilai PANEL_KEY ini sebelum deploy kalau mau key sendiri.
 // Panel dibuka dari dashboard utama (kartu "PANEL PANTAU & BLOKIR UUID").
 // Daftar blokir awet bila ada binding KV bernama PANEL_KV; tanpa KV hanya
@@ -1042,7 +1042,7 @@ ${BUG_HOST_LIST.map(function(h){ return '          <option value="' + h + '">' +
   </div>
 
 
-  <!-- Panel Monitor v1.18 -->
+  <!-- Panel Monitor v1.19 -->
   <div class="wood-card rounded-2xl p-5 mt-4">
     <div class="flex items-center justify-between mb-2">
       <span class="text-xs font-bold text-emerald-400 tracking-wider"><i class="fa-solid fa-gauge-high"></i> PANEL PANTAU &amp; BLOKIR UUID</span>
@@ -1211,7 +1211,8 @@ function generateLinks(){
   var outSecret = (proto === 'trojan') ? pw : uuid;
   var protoTitle = proto.charAt(0).toUpperCase() + proto.slice(1);
   var sepLine = '------------------------------------';
-  setOut('outSummary', [sepLine, protoTitle + ' Premium Pages', sepLine, 'Remake : ' + link, 'Uuid : ' + outSecret, 'Protokol : ' + proto.toUpperCase(), 'port : ' + port, 'Path : ' + path].join(String.fromCharCode(10)));
+  var remakeName = (proto === 'vmess' ? 'VMess-' : proto.toUpperCase() + '-') + label + '-' + port;
+  setOut('outSummary', [sepLine, protoTitle + ' Premium Pages', sepLine, 'Remake : ' + remakeName, 'Uuid : ' + outSecret, 'Protokol : ' + proto.toUpperCase(), 'port : ' + port, 'Path : ' + path].join(String.fromCharCode(10)));
 }
 function copyToClipboard(id){
   var input = el(id);
@@ -1417,4 +1418,4 @@ export default {
   }
 };
 
-// ===== v1.18 - Muse VMess Hasil Simple (basis v1.16) === END OF FILE v1.18 =====
+// ===== v1.19 - Muse VMess Remake Name (basis v1.18) === END OF FILE v1.19 =====
